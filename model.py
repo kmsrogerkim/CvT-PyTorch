@@ -54,11 +54,11 @@ class ConvTokenEmbedding(nn.Module):
     But this is a common practice to use batch norm, instead of 
         flatteing -> layer norm -> reshaping -> conv projection
     '''
-    def __init__(self, in_ch, out_ch, patch_size):
+    def __init__(self, in_ch, out_ch, k, s):
         super().__init__()
 
-        p = patch_size//2
-        self.conv_layer = nn.Conv2d(in_ch, out_ch, patch_size, patch_size, p)
+        p = k//2
+        self.conv_layer = nn.Conv2d(in_ch, out_ch, k, s, p)
         self.batch_norm = nn.BatchNorm2d(out_ch)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -135,21 +135,22 @@ class ConvTransformerBlock(nn.Module):
         )
 
 class CvT(nn.Module):
-    def __init__(self,
-                 batch_size,
-                 img_ch: int = 3,
-                 num_classes: int = 1000,
-                 # dims per stage
-                 c1: int = 64,  depth1: int = 1,
-                 c2: int = 192, depth2: int = 2,
-                 c3: int = 384, depth3: int = 6,
-                 # patch sizes per stage
-                 p1: int = 7, p2: int = 3, p3: int = 3):
+    # For these configurations, go the Table 2 from the paper
+    def __init__(self, batch_size, img_ch,
+                depth1,depth2, depth3,
+                # Conv Embadding parameters
+                k1, c1, s1, k2, c2, s2, k3, c3, s3,
+                # Conv Proj parameters
+                kp1, cp1, kp2, cp2, kp3, cp3,
+                # MHSA parameters
+                H1, D1, H2, D2, H3, D3,
+                # MLP parameters
+                R1, R2, R3, num_classes):
         super().__init__()
         # ----------------
         # Stage 1
         # ----------------
-        self.embed1 = ConvTokenEmbedding(img_ch, c1, patch_size=p1)
+        self.embed1 = ConvTokenEmbedding(img_ch, c1, k1, s1)
         self.blocks1 = nn.ModuleList([
             ConvTransformerBlock(in_ch=c1, dim=c1, k=3, s=2, num_heads=8)
             for _ in range(depth1)
@@ -158,8 +159,7 @@ class CvT(nn.Module):
         # ----------------
         # Stage 2
         # ----------------
-        # Convolutional embedding from stage1 output channels -> stage2 channels
-        self.embed2 = ConvTokenEmbedding(c1, c2, patch_size=p2)
+        self.embed2 = ConvTokenEmbedding(c1, c2, k2, s2)
         self.blocks2 = nn.ModuleList([
             ConvTransformerBlock(in_ch=c2, dim=c2, k=3, s=2, num_heads=8)
             for _ in range(depth2)
@@ -168,7 +168,7 @@ class CvT(nn.Module):
         # ----------------
         # Stage 3
         # ----------------
-        self.embed3 = ConvTokenEmbedding(c2, c3, patch_size=p3)
+        self.embed3 = ConvTokenEmbedding(c2, c3, k3, s3)
         # add cls token in stage 3
         cls_token = nn.Parameter(torch.zeros(1, 1, c3))
         self.cls_token = cls_token.expand(batch_size, -1, -1)
@@ -183,27 +183,17 @@ class CvT(nn.Module):
         self.head = nn.Linear(c3, num_classes)
 
     def forward(self, x: torch.Tensor):
-        # ----------------
-        # Stage 1
-        # ----------------
-        # Use conv feature map from embedding (not its forward that flattens).
         z1 = self.embed1(x)      # [B, c1, H1, W1]
         for blk in self.blocks1:
-            z1 = blk(z1)                    # stays [B, c1, H1, W1]
+            z1 = blk(z1)         # stays [B, c1, H1, W1]
 
-        # ----------------
-        # Stage 2
-        # ----------------
         z2 = self.embed2(z1)     # [B, c2, H2, W2]
         for blk in self.blocks2:
-            z2 = blk(z2)                    # [B, c2, H2, W2]
+            z2 = blk(z2)         # [B, c2, H2, W2]
 
-        # ----------------
-        # Stage 3
-        # ----------------
         z3 = self.embed3(z2)     # [B, c3, H3, W3]
         for blk in self.blocks3:
-            z3 = blk(z3)                    # [B, c3, H3, W3]
+            z3 = blk(z3)         # [B, c3, H3, W3]
 
         # ---- flatten grid tokens ----
         tokens = z3.flatten(2).transpose(1, 2)      # [B, N3, C3], N3 = H3*W3
@@ -219,13 +209,11 @@ class CvT(nn.Module):
 model = CvT(
     batch_size=1,
     img_ch=3, num_classes=1000,
-    c1=64, depth1=1,
-    c2=192, depth2=1,
-    c3=384, depth3=1,     # keep small for the test
+    c1=64, depth1=1, c2=192, depth2=1, c3=384, depth3=1,
     p1=7, p2=3, p3=3
 )
 
-x = torch.randn(1, 3, 224, 224)  # single image
+x = torch.randn(1, 3, 224, 224)
 with torch.no_grad():
     y = model(x)
 print("logits shape:", y.shape)   # expected: [1, 1000]
