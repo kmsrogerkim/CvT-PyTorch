@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class MultiHeadAttention(nn.Module):
     """
-    MHA that accepts already-projected Q, K, V (with possibly different sequence lengths).
+    MHA that accepts already-projected Q, K, V.
+    Supports different sequence lengths (Nq != Nk), masks, and SDPA fast path.
     """
     def __init__(self, dim: int, num_heads: int, attn_drop: float = 0.0, proj_drop: float = 0.0):
         super().__init__()
@@ -13,39 +15,75 @@ class MultiHeadAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
 
-        # final output projection
+        self.attn_drop_p = float(attn_drop)
         self.proj = nn.Linear(dim, dim)
-        self.attn_drop = nn.Dropout(attn_drop)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
-        """
-        q: [B, Nq, D], k: [B, Nk, D], v: [B, Nk, D]
-        returns: out [B, Nq, D]
-        """
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, N, D] -> [B, h, N, d]
+        B, N, D = x.shape
+        h, d = self.num_heads, self.head_dim
+        x = x.reshape(B, N, h, d).transpose(1, 2).contiguous()
+        return x
+
+    def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, h, N, d] -> [B, N, D]
+        B, h, N, d = x.shape
+        return x.transpose(1, 2).reshape(B, N, h * d)
+
+    def forward(
+        self,
+        q: torch.Tensor,           # [B, Nq, D]
+        k: torch.Tensor,           # [B, Nk, D]
+        v: torch.Tensor,           # [B, Nk, D]
+        attn_mask: torch.Tensor | None = None,        # broadcastable to [B*h, Nq, Nk] or [Nq, Nk]
+        key_padding_mask: torch.Tensor | None = None  # [B, Nk], True for PAD positions
+    ) -> torch.Tensor:
         B, Nq, D = q.shape
-        _, Nk, _ = k.shape
+        assert k.shape[0] == B and v.shape[0] == B and k.shape[2] == D and v.shape[2] == D
 
-        # reshape for heads
-        def split_heads(t):
-            return t.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)  # [B, h, N, d]
+        qh = self._split_heads(q)  # [B, h, Nq, d]
+        kh = self._split_heads(k)  # [B, h, Nk, d]
+        vh = self._split_heads(v)  # [B, h, Nk, d]
 
-        qh = split_heads(q)
-        kh = split_heads(k)
-        vh = split_heads(v)
+        # Build combined mask if key_padding_mask is provided
+        # key_padding_mask: True means "mask out"
+        if key_padding_mask is not None:
+            # expand to [B, 1, 1, Nk] then broadcast to [B, h, Nq, Nk]
+            kpm = key_padding_mask[:, None, None, :]  # bool
+        else:
+            kpm = None
 
-        # scaled dot-product attention
-        attn = (qh @ kh.transpose(-2, -1)) * self.scale        # [B, h, Nq, Nk]
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-        out = attn @ vh                                        # [B, h, Nq, d]
+        # Use PyTorch SDPA for speed/stability (handles scaling internally if you pass scaled q)
+        # We pass scaled q ourselves to match your original scale factor.
+        qh_scaled = qh * self.scale
 
-        # merge heads
-        out = out.transpose(1, 2).contiguous().view(B, Nq, D)  # [B, Nq, D]
+        # SDPA expects masks float/bool: attn_mask can be either additive (float) or boolean.
+        # If both masks exist, combine them into a single boolean mask.
+        combined_mask = None
+        if (attn_mask is not None) and (kpm is not None):
+            # convert attn_mask to boolean if needed
+            am = attn_mask
+            if am.dtype != torch.bool:
+                # treat -inf / large negative as masked
+                am = am == float("-inf")
+            combined_mask = am | kpm
+        elif attn_mask is not None:
+            combined_mask = attn_mask
+        else:
+            combined_mask = kpm
+
+        out = F.scaled_dot_product_attention(
+            qh_scaled, kh, vh,
+            attn_mask=combined_mask,
+            dropout_p=self.attn_drop_p if self.training else 0.0,
+            is_causal=False
+        )  # [B, h, Nq, d]
+
+        out = self._merge_heads(out)    # [B, Nq, D]
         out = self.proj(out)
         out = self.proj_drop(out)
         return out
-
 
 class ConvTokenEmbedding(nn.Module):
     def __init__(self, in_ch, out_ch, k, s, add_cls_token = False):
