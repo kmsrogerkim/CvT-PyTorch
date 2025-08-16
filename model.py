@@ -62,10 +62,9 @@ class ConvTokenEmbedding(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv_layer(x)
         x = x.flatten(2).transpose(1, 2) # [B, N, D]
-        x = self.layer_norm(x)
-        
         if self.add_cls_token:
             x = torch.cat([x, self.cls_token], dim=1)
+        x = self.layer_norm(x)
         return x
 
 class ConvTransformerBlock(nn.Module):
@@ -92,7 +91,7 @@ class ConvTransformerBlock(nn.Module):
         self.layer_norm = nn.LayerNorm(dim)
 
     def forward(self, x: torch.Tensor, cls_token = None) -> torch.Tensor:
-        # Convolutional projections
+        # Convolutional projections (spatial tokens only, no cls token)
         q = self.q_dw_sperable_conv_layer(x)        # [B, D, Hq, Wq]
         k = self.k_dw_sperable_conv_layer(x)        # [B, D, Hk, Wk]
         v = self.v_dw_sperable_conv_layer(x)        # [B, D, Hk, Wk]
@@ -109,6 +108,7 @@ class ConvTransformerBlock(nn.Module):
 
         x = flatten(x)
         if cls_token is not None:
+            # re-attach the cls token before attention
             x = torch.cat([cls_token, x], dim=1)
             q = torch.cat([cls_token, q], dim=1)
             k = torch.cat([cls_token, k], dim=1)
@@ -182,9 +182,8 @@ class CvT(nn.Module):
             for _ in range(depth3)
         ])
 
-        # final normalization + classifier head (use cls at the very end)
-        self.head_norm = nn.LayerNorm(c3)
-        self.head = nn.Linear(c3, num_classes)
+        # mlp head
+        self.mlp_head = nn.Linear(c3, num_classes)
 
     def forward(self, x: torch.Tensor):
         z1 = self.embed1(x)      # [B, N, D]
@@ -196,7 +195,6 @@ class CvT(nn.Module):
         for blk in self.blocks1:
             z1 = blk(z1)[0]         # shape stays 
 
-
         z2 = self.embed2(z1)
         batch_size, n, c = z2.shape
         h = int(n**0.5)
@@ -204,26 +202,24 @@ class CvT(nn.Module):
         for blk in self.blocks2:
             z2 = blk(z2)[0]
 
-
+        # ----------------
+        # Stage 3
+        # ----------------
         z3 = self.embed3(z2)
-        cls, z3 = z3[:, :1, :], z3[:, 1:, :]  # split
+        cls, z3 = z3[:, :1, :], z3[:, 1:, :]  # split cls token from spatial patch
+
         # reshape patch
         batch_size, n, c = z3.shape
         h = int(n**0.5)
         z3 = z3.reshape(batch_size, c, h, -1)
         for blk in self.blocks3:
-            z3, cls = blk(z3, cls)         # [B, c3, H3, W3]
+            z3, cls = blk(z3, cls)
+            # z3: [B, C3, H, W]
+            # cls: [B, 1+N, C3]
 
-        # flatten grid tokens
-        tokens = z3.flatten(2).transpose(1, 2)      # [B, N3, C3], N3 = H3*W3
-        # concatenate cls token before final mlp layer
-        tokens = torch.cat([cls, tokens], dim=1)# [B, 1+N3, C3]
-
-        # final norm + take cls and classify
-        tokens = self.head_norm(tokens)                    # LN over last dim
-        cls_tok = tokens[:, 0]                             # [B, C3]
-        logits = self.head(cls_tok)                        # [B, num_classes]
-        return logits
+        # mlp head
+        cls = cls.squeeze(0)
+        return self.mlp_head(cls)
 
 model = CvT(batch_size=1, img_ch=3,
             depth1=1,depth2=2, depth3=10,
