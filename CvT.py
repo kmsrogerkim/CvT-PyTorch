@@ -126,7 +126,7 @@ class ConvTransformerBlock(nn.Module):
 
         self.mlp = self.make_mlp()
 
-        self.pre_norm = nn.LayerNorm(in_ch)
+        self.pre_norm = nn.LayerNorm(dim)
         self.layer_norm = nn.LayerNorm(dim)
 
     def forward(self, x: torch.Tensor, cls_token = None) -> torch.Tensor:
@@ -134,10 +134,14 @@ class ConvTransformerBlock(nn.Module):
         def flatten(t: torch.Tensor) -> torch.Tensor:
             return t.flatten(2).transpose(1, 2)
 
-        # Is this pre-norm really necessary?
+        # pre-norm
         B, D, H, W = x.shape
         x = flatten(x)
+        if cls_token is not None:
+            x = torch.cat([cls_token, x], dim=1)
         x = self.pre_norm(x)
+        if cls_token is not None:
+            cls_token, x = x[:, :1, :], x[:, 1:, :]
         x = x.reshape(B, D, H, W)
 
         # Convolutional projections (spatial tokens only, no cls token)
@@ -165,7 +169,7 @@ class ConvTransformerBlock(nn.Module):
             cls_token = x[:, :1, :]
             x = x[:, 1:, :]
 
-        x = x.transpose(1, 2).contiguous().view(B, D, Hq, Wq)
+        x = x.transpose(1, 2).reshape(B, D, Hq, Wq)
         return x, cls_token
 
     def make_depth_wise_sperable_conv(self, in_ch, out_ch, k, s):
