@@ -88,7 +88,7 @@ class ConvTransformerBlock(nn.Module):
 
         self.mlp = self.make_mlp()
 
-        # self.pre_norm = nn.LayerNorm(in_ch)
+        self.pre_norm = nn.LayerNorm(in_ch)
         self.layer_norm = nn.LayerNorm(dim)
 
     def forward(self, x: torch.Tensor, cls_token = None) -> torch.Tensor:
@@ -96,7 +96,12 @@ class ConvTransformerBlock(nn.Module):
         def flatten(t: torch.Tensor) -> torch.Tensor:
             return t.flatten(2).transpose(1, 2)
 
-        # x = self.pre_norm(x)
+        # Is this pre-norm really necessary?
+        B, D, H, W = x.shape
+        x = flatten(x)
+        x = self.pre_norm(x)
+        x = x.reshape(B, D, H, W)
+
         # Convolutional projections (spatial tokens only, no cls token)
         q = self.q_dw_separable_conv_layer(x)        # [B, D, Hq, Wq]
         k = self.k_dw_separable_conv_layer(x)        # [B, D, Hk, Wk]
