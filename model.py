@@ -48,21 +48,23 @@ class MultiHeadAttention(nn.Module):
 
 
 class ConvTokenEmbedding(nn.Module):
-    '''
-    The paper does say "flattened into size Hi*Wi × Ci and normalized by layer normalization [1] 
-    for input into the subsequent Transformer blocks of stage i" (p. 4).
-    But this is a common practice to use batch norm, instead of 
-        flatteing -> layer norm -> reshaping -> conv projection
-    '''
-    def __init__(self, in_ch, out_ch, k, s):
+    def __init__(self, in_ch, out_ch, k, s, add_cls_token = False, batch_size = 1):
         super().__init__()
         p = k//2
         self.conv_layer = nn.Conv2d(in_ch, out_ch, k, s, p)
         self.batch_norm = nn.BatchNorm2d(out_ch)
 
+        self.add_cls_token = add_cls_token 
+        if add_cls_token:
+            cls_token = nn.Parameter(torch.zeros(1, 1, out_ch))
+            self.cls_token = cls_token.expand(batch_size, -1, -1)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.batch_norm(self.conv_layer(x))
         x = x.flatten(2).transpose(1, 2) # [B, N, D]
+        
+        if self.add_cls_token:
+            x = torch.cat([x, self.cls_token], dim=1)
         return x
 
 class ConvTransformerBlock(nn.Module):
@@ -89,7 +91,7 @@ class ConvTransformerBlock(nn.Module):
         self.layer_norm1 = nn.LayerNorm(dim)
         self.layer_norm2 = nn.LayerNorm(dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cls_token = None) -> torch.Tensor:
         # Convolutional projections
         q = self.q_dw_sperable_conv_layer(x)        # [B, D, Hq, Wq]
         k = self.k_dw_sperable_conv_layer(x)        # [B, D, Hk, Wk]
@@ -111,10 +113,16 @@ class ConvTransformerBlock(nn.Module):
 
         x = flatten(x)
         x = x + self.multi_head_attention(q, k, v)
+        if cls_token is not None:
+            x = torch.cat([cls_token, x], dim=1)
         x = x + self.mlp(self.layer_norm2(x))
 
+        if cls_token is not None:
+            cls_token = x[:, :1, :]        # [B, 1, D]
+            x = x[:, 1:, :]
+
         x = x.transpose(1, 2).contiguous().view(B, D, Hq, Wq)
-        return x
+        return x, cls_token
 
     def make_depth_wise_sperable_conv(self, in_ch, out_ch, k, s):
         return nn.Sequential(
@@ -151,7 +159,7 @@ class CvT(nn.Module):
         # ----------------
         # Stage 1
         # ----------------
-        self.embed1 = ConvTokenEmbedding(img_ch, c1, k1, s1)
+        self.embed1 = ConvTokenEmbedding(img_ch, c1, k1, s1, batch_size=batch_size)
         self.blocks1 = nn.ModuleList([
             ConvTransformerBlock(in_ch=c1, dim=c1, k=kp1, num_heads=H1, mlp_ratio=R1)
             for _ in range(depth1)
@@ -160,7 +168,7 @@ class CvT(nn.Module):
         # ----------------
         # Stage 2
         # ----------------
-        self.embed2 = ConvTokenEmbedding(c1, c2, k2, s2)
+        self.embed2 = ConvTokenEmbedding(c1, c2, k2, s2, batch_size=batch_size)
         self.blocks2 = nn.ModuleList([
             ConvTransformerBlock(in_ch=c2, dim=c2, k=kp2, num_heads=H2, mlp_ratio=R2)
             for _ in range(depth2)
@@ -169,11 +177,7 @@ class CvT(nn.Module):
         # ----------------
         # Stage 3
         # ----------------
-        self.embed3 = ConvTokenEmbedding(c2, c3, k3, s3)
-        # add cls token in stage 3
-        cls_token = nn.Parameter(torch.zeros(1, 1, c3))
-        self.cls_token = cls_token.expand(batch_size, -1, -1)
-
+        self.embed3 = ConvTokenEmbedding(c2, c3, k3, s3, add_cls_token=True, batch_size=batch_size)
         self.blocks3 = nn.ModuleList([
             ConvTransformerBlock(in_ch=c3, dim=c3, k=kp3, num_heads=H3, mlp_ratio=R3)
             for _ in range(depth3)
@@ -184,39 +188,37 @@ class CvT(nn.Module):
         self.head = nn.Linear(c3, num_classes)
 
     def forward(self, x: torch.Tensor):
-        z1 = self.embed1(x)      # [B, c1, H1, W1]
-        print(z1.shape)
+        z1 = self.embed1(x)      # [B, N, D]
+        # "flattened into size Hi*Wi × Ci and normalized by layer normalization [1] 
+        # for input into the subsequent Transformer blocks of stage i" (p. 4).
         batch_size, n, c = z1.shape
         h = int(n**0.5)
-        z1 = z1.reshape(batch_size, c, h, -1)
-        print(z1.shape)
+        z1 = z1.reshape(batch_size, c, h, -1) # [B, D, H, W]
         for blk in self.blocks1:
-            z1 = blk(z1)         # stays [B, c1, H1, W1]
+            z1 = blk(z1)[0]         # shape stays 
 
 
-        z2 = self.embed2(z1)     # [B, c2, H2, W2]
-        print(z2.shape)
+        z2 = self.embed2(z1)
         batch_size, n, c = z2.shape
         h = int(n**0.5)
         z2 = z2.reshape(batch_size, c, h, -1)
-        print(z1.shape)
         for blk in self.blocks2:
-            z2 = blk(z2)         # [B, c2, H2, W2]
+            z2 = blk(z2)[0]
 
 
-        z3 = self.embed3(z2)     # [B, c3, H3, W3]
-        print(z3.shape)
+        z3 = self.embed3(z2)
+        cls, z3 = z3[:, :1, :], z3[:, 1:, :]  # split
+        # reshape patch
         batch_size, n, c = z3.shape
         h = int(n**0.5)
         z3 = z3.reshape(batch_size, c, h, -1)
-        print(z3.shape)
         for blk in self.blocks3:
-            z3 = blk(z3)         # [B, c3, H3, W3]
+            z3, cls = blk(z3, cls)         # [B, c3, H3, W3]
 
-        # ---- flatten grid tokens ----
+        # flatten grid tokens
         tokens = z3.flatten(2).transpose(1, 2)      # [B, N3, C3], N3 = H3*W3
-
-        tokens = torch.cat([self.cls_token, tokens], dim=1)# [B, 1+N3, C3]
+        # concatenate cls token before final mlp layer
+        tokens = torch.cat([cls, tokens], dim=1)# [B, 1+N3, C3]
 
         # final norm + take cls and classify
         tokens = self.head_norm(tokens)                    # LN over last dim
