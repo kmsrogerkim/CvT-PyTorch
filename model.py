@@ -67,12 +67,12 @@ class ConvTokenEmbedding(nn.Module):
 class ConvTransformerBlock(nn.Module):
     # settings for stride for convolutional projection
     # is in Figure 3: (c) Squeezed convolutional projection
-    def __init__(self, in_ch, dim, k = 3, s = 2,
-                 num_heads = 8, attn_drop = 0.0, proj_drop = 0.0, mlp_ration = 4.0):
+    def __init__(self, in_ch, dim, k, s = 2,
+                 num_heads = 8, attn_drop = 0.0, proj_drop = 0.0, mlp_ratio = 4.0):
         super().__init__()
 
         self.dim = dim
-        self.hidden_dim = int(mlp_ration * dim)
+        self.hidden_dim = int(mlp_ratio * dim)
         self.mlp_drop = proj_drop
 
         # implementing "squeezed convolutional projection"
@@ -141,9 +141,9 @@ class CvT(nn.Module):
                 # Conv Embadding parameters
                 k1, c1, s1, k2, c2, s2, k3, c3, s3,
                 # Conv Proj parameters
-                kp1, cp1, kp2, cp2, kp3, cp3,
+                kp1, kp2, kp3,
                 # MHSA parameters
-                H1, D1, H2, D2, H3, D3,
+                H1, H2, H3,
                 # MLP parameters
                 R1, R2, R3, num_classes):
         super().__init__()
@@ -152,7 +152,7 @@ class CvT(nn.Module):
         # ----------------
         self.embed1 = ConvTokenEmbedding(img_ch, c1, k1, s1)
         self.blocks1 = nn.ModuleList([
-            ConvTransformerBlock(in_ch=c1, dim=c1, k=3, s=2, num_heads=8)
+            ConvTransformerBlock(in_ch=c1, dim=c1, k=kp1, num_heads=H1, mlp_ratio=R1)
             for _ in range(depth1)
         ])
 
@@ -161,7 +161,7 @@ class CvT(nn.Module):
         # ----------------
         self.embed2 = ConvTokenEmbedding(c1, c2, k2, s2)
         self.blocks2 = nn.ModuleList([
-            ConvTransformerBlock(in_ch=c2, dim=c2, k=3, s=2, num_heads=8)
+            ConvTransformerBlock(in_ch=c2, dim=c2, k=kp2, num_heads=H2, mlp_ratio=R2)
             for _ in range(depth2)
         ])
 
@@ -174,7 +174,7 @@ class CvT(nn.Module):
         self.cls_token = cls_token.expand(batch_size, -1, -1)
 
         self.blocks3 = nn.ModuleList([
-            ConvTransformerBlock(in_ch=c3, dim=c3, k=3, s=2, num_heads=8)
+            ConvTransformerBlock(in_ch=c3, dim=c3, k=kp3, num_heads=H3, mlp_ratio=R3)
             for _ in range(depth3)
         ])
 
