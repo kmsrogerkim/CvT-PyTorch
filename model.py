@@ -48,43 +48,21 @@ class MultiHeadAttention(nn.Module):
 
 
 class ConvTokenEmbedding(nn.Module):
-    def __init__(self, in_ch, out_ch, patch_size, cls_token = False):
+    '''
+    The paper does say "flattened into size Hi*Wi × Ci and normalized by layer normalization [1] 
+    for input into the subsequent Transformer blocks of stage i" (p. 4).
+    But this is a common practice to use batch norm, instead of 
+        flatteing -> layer norm -> reshaping -> conv projection
+    '''
+    def __init__(self, in_ch, out_ch, patch_size):
         super().__init__()
-        self.in_ch = in_ch
-        self.out_ch = out_ch
-        self.k = patch_size
-        self.s = patch_size
-        self.p = patch_size//2
 
-        # cls token is added only in stage 3
-        if cls_token:
-            # Learnable cls token: shape [1, 1, C]
-            self.cls_token = nn.Parameter(torch.zeros(1, 1, out_ch))
-            nn.init.trunc_normal_(self.cls_token, std=0.02)
-
-        self.conv_layer = self.make_conv_layers() # [B, out_ch, H, W]
-        self.layer_norm = nn.LayerNorm(out_ch)
-
+        p = patch_size//2
+        self.conv_layer = nn.Conv2d(in_ch, out_ch, patch_size, patch_size, p)
+        self.batch_norm = nn.BatchNorm2d(out_ch)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv_layer(x)        
-
-        x.flatten(2).transpose(1, 2)  # [B, N, D]
-        x = self.layer_norm(x)
-        
-        B, _, _ = x.shape
-
-        # cls token is added AFTER the embadding
-        if self.cls_token is not None:
-            cls = self.cls_token.expand(B, -1, -1) # [B, 1, C]
-            x = torch.cat([cls, x], dim=1) # [B, 1+N, C]
-
-        return x
-
-    def make_conv_layers(self):
-        return nn.Sequential(
-            nn.Conv2d(self.in_ch, self.out_ch, self.k, self.s, self.p),
-        )
+        return self.batch_norm(self.conv_layer(x))
 
 class ConvTransformerBlock(nn.Module):
     # settings for stride for convolutional projection
@@ -126,9 +104,6 @@ class ConvTransformerBlock(nn.Module):
         k = flatten(k)
         v = flatten(v)
 
-        # "flattened into size HiWi × Ci and normalized by layer normalization [1] 
-        # for input into the subsequent Transformer blocks of stage i" (p. 4)
-
         q = self.layer_norm1(q)
         k = self.layer_norm1(k)
         v = self.layer_norm1(v)
@@ -160,6 +135,97 @@ class ConvTransformerBlock(nn.Module):
         )
 
 class CvT(nn.Module):
-    def __init__(self):
+    def __init__(self,
+                 batch_size,
+                 img_ch: int = 3,
+                 num_classes: int = 1000,
+                 # dims per stage
+                 c1: int = 64,  depth1: int = 1,
+                 c2: int = 192, depth2: int = 2,
+                 c3: int = 384, depth3: int = 6,
+                 # patch sizes per stage
+                 p1: int = 7, p2: int = 3, p3: int = 3):
         super().__init__()
-        
+        # ----------------
+        # Stage 1
+        # ----------------
+        self.embed1 = ConvTokenEmbedding(img_ch, c1, patch_size=p1)
+        self.blocks1 = nn.ModuleList([
+            ConvTransformerBlock(in_ch=c1, dim=c1, k=3, s=2, num_heads=8)
+            for _ in range(depth1)
+        ])
+
+        # ----------------
+        # Stage 2
+        # ----------------
+        # Convolutional embedding from stage1 output channels -> stage2 channels
+        self.embed2 = ConvTokenEmbedding(c1, c2, patch_size=p2)
+        self.blocks2 = nn.ModuleList([
+            ConvTransformerBlock(in_ch=c2, dim=c2, k=3, s=2, num_heads=8)
+            for _ in range(depth2)
+        ])
+
+        # ----------------
+        # Stage 3
+        # ----------------
+        self.embed3 = ConvTokenEmbedding(c2, c3, patch_size=p3)
+        # add cls token in stage 3
+        cls_token = nn.Parameter(torch.zeros(1, 1, c3))
+        self.cls_token = cls_token.expand(batch_size, -1, -1)
+
+        self.blocks3 = nn.ModuleList([
+            ConvTransformerBlock(in_ch=c3, dim=c3, k=3, s=2, num_heads=8)
+            for _ in range(depth3)
+        ])
+
+        # final normalization + classifier head (use cls at the very end)
+        self.head_norm = nn.LayerNorm(c3)
+        self.head = nn.Linear(c3, num_classes)
+
+    def forward(self, x: torch.Tensor):
+        # ----------------
+        # Stage 1
+        # ----------------
+        # Use conv feature map from embedding (not its forward that flattens).
+        z1 = self.embed1(x)      # [B, c1, H1, W1]
+        for blk in self.blocks1:
+            z1 = blk(z1)                    # stays [B, c1, H1, W1]
+
+        # ----------------
+        # Stage 2
+        # ----------------
+        z2 = self.embed2(z1)     # [B, c2, H2, W2]
+        for blk in self.blocks2:
+            z2 = blk(z2)                    # [B, c2, H2, W2]
+
+        # ----------------
+        # Stage 3
+        # ----------------
+        z3 = self.embed3(z2)     # [B, c3, H3, W3]
+        for blk in self.blocks3:
+            z3 = blk(z3)                    # [B, c3, H3, W3]
+
+        # ---- flatten grid tokens ----
+        tokens = z3.flatten(2).transpose(1, 2)      # [B, N3, C3], N3 = H3*W3
+
+        tokens = torch.cat([self.cls_token, tokens], dim=1)# [B, 1+N3, C3]
+
+        # final norm + take cls and classify
+        tokens = self.head_norm(tokens)                    # LN over last dim
+        cls_tok = tokens[:, 0]                             # [B, C3]
+        logits = self.head(cls_tok)                        # [B, num_classes]
+        return logits
+
+model = CvT(
+    batch_size=1,
+    img_ch=3, num_classes=1000,
+    c1=64, depth1=1,
+    c2=192, depth2=1,
+    c3=384, depth3=1,     # keep small for the test
+    p1=7, p2=3, p3=3
+)
+
+x = torch.randn(1, 3, 224, 224)  # single image
+with torch.no_grad():
+    y = model(x)
+print("logits shape:", y.shape)   # expected: [1, 1000]
