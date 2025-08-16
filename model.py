@@ -61,7 +61,9 @@ class ConvTokenEmbedding(nn.Module):
         self.batch_norm = nn.BatchNorm2d(out_ch)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.batch_norm(self.conv_layer(x))
+        x = self.batch_norm(self.conv_layer(x))
+        x = x.flatten(2).transpose(1, 2) # [B, N, D]
+        return x
 
 class ConvTransformerBlock(nn.Module):
     # settings for stride for convolutional projection
@@ -183,14 +185,31 @@ class CvT(nn.Module):
 
     def forward(self, x: torch.Tensor):
         z1 = self.embed1(x)      # [B, c1, H1, W1]
+        print(z1.shape)
+        batch_size, n, c = z1.shape
+        h = int(n**0.5)
+        z1 = z1.reshape(batch_size, c, h, -1)
+        print(z1.shape)
         for blk in self.blocks1:
             z1 = blk(z1)         # stays [B, c1, H1, W1]
 
+
         z2 = self.embed2(z1)     # [B, c2, H2, W2]
+        print(z2.shape)
+        batch_size, n, c = z2.shape
+        h = int(n**0.5)
+        z2 = z2.reshape(batch_size, c, h, -1)
+        print(z1.shape)
         for blk in self.blocks2:
             z2 = blk(z2)         # [B, c2, H2, W2]
 
+
         z3 = self.embed3(z2)     # [B, c3, H3, W3]
+        print(z3.shape)
+        batch_size, n, c = z3.shape
+        h = int(n**0.5)
+        z3 = z3.reshape(batch_size, c, h, -1)
+        print(z3.shape)
         for blk in self.blocks3:
             z3 = blk(z3)         # [B, c3, H3, W3]
 
