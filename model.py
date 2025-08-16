@@ -52,7 +52,7 @@ class ConvTokenEmbedding(nn.Module):
         super().__init__()
         p = k//2
         self.conv_layer = nn.Conv2d(in_ch, out_ch, k, s, p)
-        self.batch_norm = nn.BatchNorm2d(out_ch)
+        self.layer_norm = nn.LayerNorm(out_ch)
 
         self.add_cls_token = add_cls_token 
         if add_cls_token:
@@ -60,8 +60,9 @@ class ConvTokenEmbedding(nn.Module):
             self.cls_token = cls_token.expand(batch_size, -1, -1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.batch_norm(self.conv_layer(x))
+        x = self.conv_layer(x)
         x = x.flatten(2).transpose(1, 2) # [B, N, D]
+        x = self.layer_norm(x)
         
         if self.add_cls_token:
             x = torch.cat([x, self.cls_token], dim=1)
@@ -88,8 +89,7 @@ class ConvTransformerBlock(nn.Module):
 
         self.mlp = self.make_mlp()
 
-        self.layer_norm1 = nn.LayerNorm(dim)
-        self.layer_norm2 = nn.LayerNorm(dim)
+        self.layer_norm = nn.LayerNorm(dim)
 
     def forward(self, x: torch.Tensor, cls_token = None) -> torch.Tensor:
         # Convolutional projections
@@ -107,18 +107,17 @@ class ConvTransformerBlock(nn.Module):
         k = flatten(k)
         v = flatten(v)
 
-        q = self.layer_norm1(q)
-        k = self.layer_norm1(k)
-        v = self.layer_norm1(v)
-
         x = flatten(x)
-        x = x + self.multi_head_attention(q, k, v)
         if cls_token is not None:
             x = torch.cat([cls_token, x], dim=1)
-        x = x + self.mlp(self.layer_norm2(x))
+            q = torch.cat([cls_token, q], dim=1)
+            k = torch.cat([cls_token, k], dim=1)
+            v = torch.cat([cls_token, v], dim=1)
+        x = x + self.multi_head_attention(q, k, v)
+        x = x + self.mlp(self.layer_norm(x))
 
         if cls_token is not None:
-            cls_token = x[:, :1, :]        # [B, 1, D]
+            cls_token = x[:, :1, :]
             x = x[:, 1:, :]
 
         x = x.transpose(1, 2).contiguous().view(B, D, Hq, Wq)
