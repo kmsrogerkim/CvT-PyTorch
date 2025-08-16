@@ -48,7 +48,7 @@ class MultiHeadAttention(nn.Module):
 
 
 class ConvTokenEmbedding(nn.Module):
-    def __init__(self, in_ch, out_ch, k, s, add_cls_token = False, batch_size = 1):
+    def __init__(self, in_ch, out_ch, k, s, add_cls_token = False):
         super().__init__()
         p = k//2
         self.conv_layer = nn.Conv2d(in_ch, out_ch, k, s, p)
@@ -71,12 +71,12 @@ class ConvTransformerBlock(nn.Module):
     # settings for stride for convolutional projection
     # is in Figure 3: (c) Squeezed convolutional projection
     def __init__(self, in_ch, dim, k, s = 2,
-                 num_heads = 8, attn_drop = 0.0, proj_drop = 0.0, mlp_ratio = 4.0):
+                 num_heads = 8, attn_drop = 0.0, proj_drop = 0.0, mlp_ratio = 4.0, mlp_drop = 0.0):
         super().__init__()
 
         self.dim = dim
         self.hidden_dim = int(mlp_ratio * dim)
-        self.mlp_drop = proj_drop
+        self.mlp_drop = mlp_drop 
 
         # implementing "squeezed convolutional projection"
         # where the length for q is different from k & v
@@ -145,7 +145,10 @@ class ConvTransformerBlock(nn.Module):
 class CvT(nn.Module):
     # For these configurations, go the Table 2 from the paper
     def __init__(self, batch_size, img_ch,
-                depth1,depth2, depth3,
+                # dropout rates
+                attn_drop, proj_drop, mlp_drop,
+                # Depth of stage
+                depth1, depth2, depth3,
                 # Conv Embadding parameters
                 k1, c1, s1, k2, c2, s2, k3, c3, s3,
                 # Conv Proj parameters
@@ -158,27 +161,30 @@ class CvT(nn.Module):
         # ----------------
         # Stage 1
         # ----------------
-        self.embed1 = ConvTokenEmbedding(img_ch, c1, k1, s1, batch_size=batch_size)
+        self.embed1 = ConvTokenEmbedding(img_ch, c1, k1, s1)
         self.blocks1 = nn.ModuleList([
-            ConvTransformerBlock(in_ch=c1, dim=c1, k=kp1, num_heads=H1, mlp_ratio=R1)
+            ConvTransformerBlock(in_ch=c1, dim=c1, k=kp1, num_heads=H1, mlp_ratio=R1, 
+                                 attn_drop=attn_drop, proj_drop=proj_drop, mlp_drop=mlp_drop)
             for _ in range(depth1)
         ])
 
         # ----------------
         # Stage 2
         # ----------------
-        self.embed2 = ConvTokenEmbedding(c1, c2, k2, s2, batch_size=batch_size)
+        self.embed2 = ConvTokenEmbedding(c1, c2, k2, s2)
         self.blocks2 = nn.ModuleList([
-            ConvTransformerBlock(in_ch=c2, dim=c2, k=kp2, num_heads=H2, mlp_ratio=R2)
+            ConvTransformerBlock(in_ch=c2, dim=c2, k=kp2, num_heads=H2, mlp_ratio=R2,
+                                 attn_drop=attn_drop, proj_drop=proj_drop, mlp_drop=mlp_drop)
             for _ in range(depth2)
         ])
 
         # ----------------
         # Stage 3
         # ----------------
-        self.embed3 = ConvTokenEmbedding(c2, c3, k3, s3, add_cls_token=True, batch_size=batch_size)
+        self.embed3 = ConvTokenEmbedding(c2, c3, k3, s3, add_cls_token=True)
         self.blocks3 = nn.ModuleList([
-            ConvTransformerBlock(in_ch=c3, dim=c3, k=kp3, num_heads=H3, mlp_ratio=R3)
+            ConvTransformerBlock(in_ch=c3, dim=c3, k=kp3, num_heads=H3, mlp_ratio=R3,
+                                 attn_drop=attn_drop, proj_drop=proj_drop, mlp_drop=mlp_drop)
             for _ in range(depth3)
         ])
 
@@ -223,7 +229,8 @@ class CvT(nn.Module):
         return self.mlp_head(cls)
 
 model = CvT(batch_size=6, img_ch=3,
-            depth1=1,depth2=2, depth3=10,
+            attn_drop=0.1, proj_drop=0.1, mlp_drop=0.1,
+            depth1=1, depth2=2, depth3=10,
             # Conv Embadding parameters
             k1=7, c1=64, s1=4, k2=3, c2=192, s2=2, k3=3, c3=384, s3=2,
             # Conv Proj parameters
