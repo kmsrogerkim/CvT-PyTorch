@@ -97,7 +97,7 @@ class ConvTransformerBlock(nn.Module):
 
         # Flatten to sequences [B, N, D]
         def flatten(t: torch.Tensor) -> torch.Tensor:
-            return t.flatten(2).transpose(1, 2)     # [B, N, D]
+            return t.flatten(2).transpose(1, 2)
 
         q = flatten(q)
         k = flatten(k)
@@ -107,7 +107,8 @@ class ConvTransformerBlock(nn.Module):
         k = self.layer_norm1(k)
         v = self.layer_norm1(v)
 
-        x = q + self.multi_head_attention(q, k, v)
+        x = flatten(x)
+        x = x + self.multi_head_attention(q, k, v)
         x = x + self.mlp(self.layer_norm2(x))
 
         x = x.transpose(1, 2).contiguous().view(B, D, Hq, Wq)
