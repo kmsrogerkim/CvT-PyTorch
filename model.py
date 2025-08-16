@@ -46,13 +46,50 @@ class MultiHeadAttention(nn.Module):
         out = self.proj_drop(out)
         return out
 
-class ConvTokenEmbedding(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
 
+class ConvTokenEmbedding(nn.Module):
+    def __init__(self, in_ch, out_ch, patch_size, cls_token = False):
+        super().__init__()
+        self.in_ch = in_ch
+        self.out_ch = out_ch
+        self.k = patch_size
+        self.s = patch_size
+        self.p = patch_size//2
+
+        # cls token is added only in stage 3
+        if cls_token:
+            # Learnable cls token: shape [1, 1, C]
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, out_ch))
+            nn.init.trunc_normal_(self.cls_token, std=0.02)
+
+        self.conv_layer = self.make_conv_layers() # [B, out_ch, H, W]
+        self.layer_norm = nn.LayerNorm(out_ch)
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv_layer(x)        
+
+        x.flatten(2).transpose(1, 2)  # [B, N, D]
+        x = self.layer_norm(x)
+        
+        B, _, _ = x.shape
+
+        # cls token is added AFTER the embadding
+        if self.cls_token is not None:
+            cls = self.cls_token.expand(B, -1, -1) # [B, 1, C]
+            x = torch.cat([cls, x], dim=1) # [B, 1+N, C]
+
+        return x
+
+    def make_conv_layers(self):
+        return nn.Sequential(
+            nn.Conv2d(self.in_ch, self.out_ch, self.k, self.s, self.p),
+        )
 
 class ConvTransformerBlock(nn.Module):
-    def __init__(self, in_ch, dim, kq = 3, kk = 3, kv = 3, skv = 2,
+    # settings for stride for convolutional projection
+    # is in Figure 3: (c) Squeezed convolutional projection
+    def __init__(self, in_ch, dim, k = 3, s = 2,
                  num_heads = 8, attn_drop = 0.0, proj_drop = 0.0, mlp_ration = 4.0):
         super().__init__()
 
@@ -62,9 +99,9 @@ class ConvTransformerBlock(nn.Module):
 
         # implementing "squeezed convolutional projection"
         # where the length for q is different from k & v
-        self.q_dw_sperable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, kq, s=1)
-        self.k_dw_sperable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, kk, s=skv)
-        self.v_dw_sperable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, kv, s=skv)
+        self.q_dw_sperable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, k, s=1)
+        self.k_dw_sperable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, k, s)
+        self.v_dw_sperable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, k, s)
 
         self.multi_head_attention = MultiHeadAttention(dim, num_heads, attn_drop, proj_drop)
 
@@ -82,18 +119,22 @@ class ConvTransformerBlock(nn.Module):
         B, D, Hq, Wq = q.shape
 
         # Flatten to sequences [B, N, D]
-        def to_seq(t: torch.Tensor) -> torch.Tensor:
+        def flatten(t: torch.Tensor) -> torch.Tensor:
             return t.flatten(2).transpose(1, 2)     # [B, N, D]
 
-        q = to_seq(q)
-        k = to_seq(k)
-        v = to_seq(v)
+        q = flatten(q)
+        k = flatten(k)
+        v = flatten(v)
+
+        # "flattened into size HiWi × Ci and normalized by layer normalization [1] 
+        # for input into the subsequent Transformer blocks of stage i" (p. 4)
 
         q = self.layer_norm1(q)
         k = self.layer_norm1(k)
         v = self.layer_norm1(v)
 
         x = q + self.multi_head_attention(q, k, v)
+        print(x.shape)
         x = x + self.mlp(self.layer_norm2(x))
 
         x = x.transpose(1, 2).contiguous().view(B, D, Hq, Wq)
@@ -102,8 +143,7 @@ class ConvTransformerBlock(nn.Module):
     def make_depth_wise_sperable_conv(self, in_ch, out_ch, k, s):
         return nn.Sequential(
             # depth wise
-            nn.Conv2d(in_ch, out_ch, kernel_size=k, padding=k//2, stride=s,
-                      groups=in_ch),
+            nn.Conv2d(in_ch, out_ch, k, s, padding=k//2, groups=in_ch),
             nn.BatchNorm2d(out_ch),
             nn.GELU(),
 
