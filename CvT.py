@@ -80,27 +80,29 @@ class ConvTransformerBlock(nn.Module):
 
         # implementing "squeezed convolutional projection"
         # where the length for q is different from k & v
-        self.q_dw_sperable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, k, s=1)
-        self.k_dw_sperable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, k, s)
-        self.v_dw_sperable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, k, s)
+        self.q_dw_separable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, k, s=1)
+        self.k_dw_separable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, k, s)
+        self.v_dw_separable_conv_layer = self.make_depth_wise_sperable_conv(in_ch, dim, k, s)
 
         self.multi_head_attention = MultiHeadAttention(dim, num_heads, attn_drop, proj_drop)
 
         self.mlp = self.make_mlp()
 
+        # self.pre_norm = nn.LayerNorm(in_ch)
         self.layer_norm = nn.LayerNorm(dim)
 
     def forward(self, x: torch.Tensor, cls_token = None) -> torch.Tensor:
-        # Convolutional projections (spatial tokens only, no cls token)
-        q = self.q_dw_sperable_conv_layer(x)        # [B, D, Hq, Wq]
-        k = self.k_dw_sperable_conv_layer(x)        # [B, D, Hk, Wk]
-        v = self.v_dw_sperable_conv_layer(x)        # [B, D, Hk, Wk]
-
-        B, D, Hq, Wq = q.shape
-
         # Flatten to sequences [B, N, D]
         def flatten(t: torch.Tensor) -> torch.Tensor:
             return t.flatten(2).transpose(1, 2)
+
+        # x = self.pre_norm(x)
+        # Convolutional projections (spatial tokens only, no cls token)
+        q = self.q_dw_separable_conv_layer(x)        # [B, D, Hq, Wq]
+        k = self.k_dw_separable_conv_layer(x)        # [B, D, Hk, Wk]
+        v = self.v_dw_separable_conv_layer(x)        # [B, D, Hk, Wk]
+
+        B, D, Hq, Wq = q.shape
 
         q = flatten(q)
         k = flatten(k)
@@ -125,13 +127,11 @@ class ConvTransformerBlock(nn.Module):
 
     def make_depth_wise_sperable_conv(self, in_ch, out_ch, k, s):
         return nn.Sequential(
-            # depth wise
-            nn.Conv2d(in_ch, out_ch, k, s, padding=k//2, groups=in_ch),
-            nn.BatchNorm2d(out_ch),
+            nn.Conv2d(in_ch, in_ch, k, s, padding=k//2, groups=in_ch),
+            nn.BatchNorm2d(in_ch),
             nn.GELU(),
-
-            # point wise
-            nn.Conv2d(out_ch, out_ch, kernel_size=1),
+            nn.Conv2d(in_ch, out_ch, kernel_size=1),
+            nn.GELU(),
         )
 
     def make_mlp(self):
@@ -144,7 +144,7 @@ class ConvTransformerBlock(nn.Module):
 
 class CvT(nn.Module):
     # For these configurations, go the Table 2 from the paper
-    def __init__(self, batch_size, img_ch,
+    def __init__(self, img_ch,
                 # dropout rates
                 attn_drop, proj_drop, mlp_drop,
                 # Depth of stage
@@ -221,14 +221,13 @@ class CvT(nn.Module):
         for blk in self.blocks3:
             z3, cls = blk(z3, cls)
             # z3: [B, C3, H, W]
-            # cls: [B, 1+N, C3]
+            # cls: [B, 1, C3]
 
         # mlp head
-        cls = cls.squeeze(0)
         cls = cls.squeeze(1)
         return self.mlp_head(cls)
 
-model = CvT(batch_size=6, img_ch=3,
+model = CvT(img_ch=3,
             attn_drop=0.1, proj_drop=0.1, mlp_drop=0.1,
             depth1=1, depth2=2, depth3=10,
             # Conv Embadding parameters
@@ -238,4 +237,9 @@ model = CvT(batch_size=6, img_ch=3,
             # MHSA parameters
             H1=1, H2=3, H3=6,
             # MLP parameters
-            R1=4, R2=4, R3=4, num_classes=1000)
+            R1=4, R2=4, R3=4, num_classes=37)
+
+x = torch.rand([6, 3, 224, 224])
+x = x.to(torch.device("cuda"))
+model = model.to(torch.device("cuda"))
+print(model(x).shape)
