@@ -56,14 +56,14 @@ class ConvTokenEmbedding(nn.Module):
 
         self.add_cls_token = add_cls_token 
         if add_cls_token:
-            cls_token = nn.Parameter(torch.zeros(1, 1, out_ch))
-            self.cls_token = cls_token.expand(batch_size, -1, -1)
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, out_ch))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv_layer(x)
         x = x.flatten(2).transpose(1, 2) # [B, N, D]
         if self.add_cls_token:
-            x = torch.cat([x, self.cls_token], dim=1)
+            cls = self.cls_token.expand(x.size(0), -1, -1).to(device=x.device, dtype=x.dtype)
+            x = torch.cat([x, cls], dim=1)
         x = self.layer_norm(x)
         return x
 
@@ -219,9 +219,10 @@ class CvT(nn.Module):
 
         # mlp head
         cls = cls.squeeze(0)
+        cls = cls.squeeze(1)
         return self.mlp_head(cls)
 
-model = CvT(batch_size=1, img_ch=3,
+model = CvT(batch_size=6, img_ch=3,
             depth1=1,depth2=2, depth3=10,
             # Conv Embadding parameters
             k1=7, c1=64, s1=4, k2=3, c2=192, s2=2, k3=3, c3=384, s3=2,
@@ -231,8 +232,3 @@ model = CvT(batch_size=1, img_ch=3,
             H1=1, H2=3, H3=6,
             # MLP parameters
             R1=4, R2=4, R3=4, num_classes=1000)
-
-x = torch.randn(1, 3, 224, 224)
-with torch.no_grad():
-    y = model(x)
-print("logits shape:", y.shape)   # expected: [1, 1000]
