@@ -56,7 +56,6 @@ class ConvTokenEmbedding(nn.Module):
     '''
     def __init__(self, in_ch, out_ch, k, s):
         super().__init__()
-
         p = k//2
         self.conv_layer = nn.Conv2d(in_ch, out_ch, k, s, p)
         self.batch_norm = nn.BatchNorm2d(out_ch)
@@ -109,7 +108,6 @@ class ConvTransformerBlock(nn.Module):
         v = self.layer_norm1(v)
 
         x = q + self.multi_head_attention(q, k, v)
-        print(x.shape)
         x = x + self.mlp(self.layer_norm2(x))
 
         x = x.transpose(1, 2).contiguous().view(B, D, Hq, Wq)
@@ -206,12 +204,16 @@ class CvT(nn.Module):
         logits = self.head(cls_tok)                        # [B, num_classes]
         return logits
 
-model = CvT(
-    batch_size=1,
-    img_ch=3, num_classes=1000,
-    c1=64, depth1=1, c2=192, depth2=1, c3=384, depth3=1,
-    p1=7, p2=3, p3=3
-)
+model = CvT(batch_size=1, img_ch=3,
+            depth1=1,depth2=2, depth3=10,
+            # Conv Embadding parameters
+            k1=7, c1=64, s1=4, k2=3, c2=192, s2=2, k3=3, c3=384, s3=2,
+            # Conv Proj parameters
+            kp1=3, kp2=3, kp3=3,
+            # MHSA parameters
+            H1=1, H2=3, H3=6,
+            # MLP parameters
+            R1=4, R2=4, R3=4, num_classes=1000)
 
 x = torch.randn(1, 3, 224, 224)
 with torch.no_grad():
