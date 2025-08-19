@@ -22,10 +22,10 @@ The key components of CvT are:
 *   **Convolutional Token Embedding**: This module reshapes the 2D input image into a sequence of 1D tokens, similar to ViT, but uses a convolutional layer instead of a linear projection. This allows the model to learn local spatial context.
 *   **Convolutional Transformer Block**: This block replaces the linear projections in the multi-head attention (MHA) module with depth-wise separable convolutions. This allows the model to capture local spatial context and reduces the number of parameters.
 
-The model architecture for the Oxford-IIIT Pet Dataset is shown below:
+The model architecture details are shown in the paper.
 
 <p align="center">
-  <img src="./media/Architecture_for_Oxford-IIIT_Pet_Dataset.png" width="800"/>
+  <img src="./media/cvt_models.png" width="800"/>
 </p>
 
 ## Dataset
@@ -44,19 +44,15 @@ Then, you can run the `train.ipynb` notebook to train the model.
 
 ## Results
 
-The learning curve for the model is shown below:
+The learning curve for the CvT-13 model is shown below:
 
 <p align="center">
-  <img src="./media/learning_curve.png" width="600"/>
+  <img src="./media/CvT-13-Learning-Curve.png" width="100%"/>
 </p>
 
 ## Issues
 
-You can see the learning curve isn't in its most desirable shape. The paper first trains the model on HUGE datasets, then transfer it to smaller datasets, like the Oxford Pet dataset. However, I had to train this on my 6GB VRAM NVIDIA GPU, making that impossible. So I tried to just reduce the model size (you can see my model has only 2.24M parameters) and train only on the Oxford Pets dataset, with 7000+ images. 
-
-Guess that's not how it works for CvTs. Overfitting was not solvable.
-
-If anybody has a solution to this, (training CvTs on small datasets without transfer learning), please feel free to create a issue. 
+You can see the learning curve isn't in its most desirable shape. The paper first trains the model on HUGE datasets, then transfer it to smaller datasets, like the Oxford Pet dataset. However, I had to train this on my 6GB VRAM NVIDIA GPU, making that impossible. As a result, overfitting was un-avoidable. And loss didn't go down below 3.0.
 
 ## References
 
